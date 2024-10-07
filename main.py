@@ -66,8 +66,37 @@ def verify_token(token: str):
             headers={"WWW-Authenticate": "Bearer"},
         )
 
+
+def get_user_info(token: str):
+    try:
+        rsa_key = get_rsa_key(token)
+        payload = jwt.decode(
+            token,
+            rsa_key,
+            algorithms=ALGORITHMS,
+            audience=API_IDENTIFIER,
+            issuer=f"https://{AUTH0_DOMAIN}/",
+            options={"verify_aud": False}  # ID tokens might have a different audience
+        )
+        return {
+            "sub": payload.get("sub"),
+            "name": payload.get("name"),
+            "email": payload.get("email"),
+            "picture": payload.get("picture"),
+            # Add any other claims you expect in your ID token
+        }
+    except JWTError as e:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Invalid or expired token: {str(e)}",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+
 async def get_current_user(token: HTTPAuthorizationCredentials = Depends(HTTPBearer())):
     return verify_token(token.credentials)
+    # return get_user_info(token.credentials)
+
 
 @app.get("/protected")
 async def protected_route(current_user: dict = Depends(get_current_user)):
