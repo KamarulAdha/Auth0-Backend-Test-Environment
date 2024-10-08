@@ -1,118 +1,106 @@
-# Test for access token expiry timer, refresh token, permissions, roles
-
-
-from fastapi import FastAPI, Depends, HTTPException, status
-from jose import jwt, jwk
-from jose.exceptions import JWTError, JWKError
+from fastapi import FastAPI, Depends, HTTPException
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-import requests
-from functools import lru_cache
+from jose import jwt
+from urllib.request import urlopen
+import json
+from fastapi.middleware.cors import CORSMiddleware
+
 
 app = FastAPI()
 
-# Auth0 configuration
-AUTH0_DOMAIN = "dev-dunuavrz3gvrmql7.eu.auth0.com"
-API_IDENTIFIER = "https://refactored-guide-rpj95qp99wgc5q7p-8000.app.github.dev/"
-ALGORITHMS = ["RS256"]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Adjust as needed
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-@lru_cache(maxsize=1)
-def get_jwks():
-    jwks_url = f"https://{AUTH0_DOMAIN}/.well-known/jwks.json"
-    response = requests.get(jwks_url)
-    response.raise_for_status()  # Raise an exception for HTTP errors
-    return response.json()
+security = HTTPBearer()
 
-def get_rsa_key(token):
-    try:
-        unverified_header = jwt.get_unverified_header(token)
-    except jwt.JWTError:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid token header",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    
-    jwks = get_jwks()
+AUTH0_DOMAIN = 'dev-z5zay63vpst0d8cq.eu.auth0.com'
+API_AUDIENCE = 'https://symmetrical-rotary-phone-ppxv54pv5xj36pxq.github.dev/'
+ALGORITHMS = ['RS256']
+
+class AuthError(Exception):
+    def __init__(self, error, status_code):
+        self.error = error
+        self.status_code = status_code
+
+def get_token_auth_header(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    return credentials.credentials
+
+def verify_jwt(token: str):
+    jsonurl = urlopen(f"https://{AUTH0_DOMAIN}/.well-known/jwks.json")
+    jwks = json.loads(jsonurl.read())
+    unverified_header = jwt.get_unverified_header(token)
+    rsa_key = {}
+
     for key in jwks["keys"]:
         if key["kid"] == unverified_header["kid"]:
-            return {
+            rsa_key = {
                 "kty": key["kty"],
                 "kid": key["kid"],
                 "use": key["use"],
                 "n": key["n"],
                 "e": key["e"]
             }
-    raise HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Unable to find appropriate key",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
 
-def verify_token(token: str):
+    if rsa_key:
+        try:
+            payload = jwt.decode(
+                token,
+                rsa_key,
+                algorithms=ALGORITHMS,
+                audience=API_AUDIENCE,
+                issuer=f"https://{AUTH0_DOMAIN}/"
+            )
+            return payload
+        except jwt.ExpiredSignatureError:
+            raise AuthError({"code": "token_expired", "description": "Token is expired"}, 401)
+        except jwt.JWTClaimsError:
+            raise AuthError(
+                {
+                    "code": "invalid_claims",
+                    "description": "Incorrect claims. Please, check the audience and issuer.",
+                },
+                401,
+            )
+        except Exception:
+            raise AuthError(
+                {
+                    "code": "invalid_header",
+                    "description": "Unable to parse authentication token.",
+                },
+                401,
+            )
+    else:
+        raise AuthError(
+            {
+                "code": "invalid_header",
+                "description": "Unable to find the appropriate key.",
+            },
+            401,
+        )
+
+def requires_auth(token: str = Depends(get_token_auth_header)):
     try:
-        rsa_key = get_rsa_key(token)
-        payload = jwt.decode(
-            token,
-            rsa_key,
-            algorithms=ALGORITHMS,
-            audience=API_IDENTIFIER,
-            issuer=f"https://{AUTH0_DOMAIN}/",
-        )
-        return payload
-    except JWTError as e:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Invalid or expired token: {str(e)}",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+        payload = verify_jwt(token)
+    except AuthError as err:
+        raise HTTPException(status_code=err.status_code, detail=err.error)
+    return payload
 
-
-def get_user_info(token: str):
-    try:
-        rsa_key = get_rsa_key(token)
-        payload = jwt.decode(
-            token,
-            rsa_key,
-            algorithms=ALGORITHMS,
-            audience=API_IDENTIFIER,
-            issuer=f"https://{AUTH0_DOMAIN}/",
-            options={"verify_aud": False}  # ID tokens might have a different audience
-        )
-        return {
-            "sub": payload.get("sub"),
-            "name": payload.get("name"),
-            "email": payload.get("email"),
-            "picture": payload.get("picture"),
-            # Add any other claims you expect in your ID token
-        }
-    except JWTError as e:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Invalid or expired token: {str(e)}",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-
-
-async def get_current_user(token: HTTPAuthorizationCredentials = Depends(HTTPBearer())):
-    return verify_token(token.credentials)
-    # return get_user_info(token.credentials)
-
+@app.get("/public")
+def public():
+    return {"message": "Public Endpoint"}
 
 @app.get("/protected")
-async def protected_route(current_user: dict = Depends(get_current_user)):
-    return {"message": "You have accessed a protected route!", "user": current_user}
+def protected(payload: dict = Depends(requires_auth)):
+    return {
+        "message": "Private Endpoint",
+        "user": payload,
+    }
 
-
-# async def get_current_user(token: HTTPAuthorizationCredentials = Depends(HTTPBearer())):
-#     return get_user_info(token.credentials)
-
-# @app.get("/protected")
-# async def protected_route(current_user: dict = Depends(get_current_user)):
-#     return {"message": "You have accessed a protected route!", "user": current_user}
-
-@app.get("/")
-async def root():
-    return {"message": "Hello, World!"}
 
 if __name__ == "__main__":
     import uvicorn
